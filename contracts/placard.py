@@ -194,6 +194,48 @@ class Placard(gl.Contract):
         if amount_int > 0:
             _Recipient(Address(to_address)).emit_transfer(value=u256(amount_int))
 
+    def _charge_escrow(self, campaign: dict, amount) -> None:
+        # Accounting only, deliberately separate from paying. No campaign may
+        # spend value escrowed by another: the contract's balance is shared and
+        # this assertion is the only thing keeping the campaigns apart inside
+        # it. A shortfall is a bug and must stop the transaction rather than
+        # quietly draining a neighbour.
+        #
+        # This is split from the transfer because a settlement can owe one
+        # address both a period share and a returned bond, and those must leave
+        # as a single transfer. Two transfers to the same address in one
+        # transaction do not both land.
+        amount_int = int(amount)
+        if amount_int <= 0:
+            return
+        held = int(campaign["escrowed_wei"])
+        if amount_int > held:
+            raise gl.vm.UserError(
+                ERROR_EXPECTED + " Payout of " + str(amount_int)
+                + " wei exceeds this campaign's unreleased escrow of " + str(held) + " wei"
+            )
+        campaign["escrowed_wei"] = str(held - amount_int)
+
+    def _pay_from(self, campaign: dict, to_address: str, amount) -> None:
+        self._charge_escrow(campaign, amount)
+        self._pay(to_address, amount)
+
+    def _refuse_payable(self, reason: str) -> None:
+        # Raising out of a payable method does NOT return the caller's value.
+        # The state change is reverted but the transfer into the contract is
+        # not, so every guard on a payable method is otherwise a way to strand
+        # somebody's money here permanently. Measured on Studionet: a refused
+        # dispute_period carrying 1 GEN left the contract 1 GEN heavier and the
+        # caller 1 GEN poorer.
+        #
+        # So a payable method never raises once value is attached. It returns
+        # the value, records why, and exits normally.
+        sender = _addr(gl.message.sender_address.as_hex)
+        value = int(gl.message.value)
+        if value > 0:
+            self._pay(sender, value)
+        self._audit("PROTOCOL", "0", "PAYABLE_REFUSED", sender, str(reason)[:200])
+
     # ------------------------------------------------------------- fetching
 
     def _fetch(self, url: str) -> str:
@@ -261,29 +303,29 @@ class Placard(gl.Contract):
         advertiser = _addr(gl.message.sender_address.as_hex)
         budget = int(gl.message.value)
         if budget <= 0:
-            raise gl.vm.UserError(ERROR_EXPECTED + " A campaign must escrow a positive budget")
+            return self._refuse_payable(" A campaign must escrow a positive budget")
 
         try:
             periods_n = int(periods_total)
         except (ValueError, TypeError):
-            raise gl.vm.UserError(ERROR_EXPECTED + " periods_total must be an integer")
+            return self._refuse_payable(" periods_total must be an integer")
         if periods_n < 1:
-            raise gl.vm.UserError(ERROR_EXPECTED + " periods_total must be at least 1")
+            return self._refuse_payable(" periods_total must be at least 1")
 
         try:
             strikes_n = int(strike_limit)
         except (ValueError, TypeError):
-            raise gl.vm.UserError(ERROR_EXPECTED + " strike_limit must be an integer")
+            return self._refuse_payable(" strike_limit must be an integer")
         if strikes_n < 1:
-            raise gl.vm.UserError(ERROR_EXPECTED + " strike_limit must be at least 1")
+            return self._refuse_payable(" strike_limit must be at least 1")
 
         rules = str(safety_rules).strip()
         if len(rules) < 10:
-            raise gl.vm.UserError(ERROR_EXPECTED + " safety_rules must actually state something")
+            return self._refuse_payable(" safety_rules must actually state something")
 
         per_period = budget // periods_n
         if per_period <= 0:
-            raise gl.vm.UserError(ERROR_EXPECTED + " budget is too small to split across periods_total")
+            return self._refuse_payable(" budget is too small to split across periods_total")
         remainder = budget - per_period * periods_n
 
         campaign_id = str(int(self.campaign_count))
@@ -298,6 +340,15 @@ class Placard(gl.Contract):
             "periods_total": periods_n,
             "periods_paid": 0,
             "periods_failed": 0,
+            # Periods submitted but not yet decided. Counted against the budget
+            # exactly like a decided one, because each of them can still become
+            # a payout. Without this, a publisher could submit more periods than
+            # the campaign has, wait, and then collect a share for every one.
+            "periods_pending": 0,
+            # What this campaign still holds. Every payout is checked against it
+            # and subtracts from it, so one campaign can never spend value
+            # escrowed by another, whatever else goes wrong.
+            "escrowed_wei": str(budget),
             "per_period_wei": str(per_period),
             "remainder_wei": str(remainder),
             "strike_limit": strikes_n,
@@ -334,12 +385,21 @@ class Placard(gl.Contract):
         if campaign["status"] != STATUS_OPEN:
             raise gl.vm.UserError(ERROR_EXPECTED + " Campaign is not open")
 
-        budget = int(campaign["budget_wei"])
-        released = int(campaign["released_wei"])
+        # Refuse to close over undecided work. A period still awaiting its round,
+        # or a live dispute, is value this campaign has already committed; paying
+        # the advertiser out from under it would leave the later settlement with
+        # nothing to draw on but another campaign's escrow.
+        if int(campaign["periods_pending"]) > 0:
+            raise gl.vm.UserError(
+                ERROR_EXPECTED + " This campaign has "
+                + str(campaign["periods_pending"])
+                + " period(s) still awaiting verification or dispute resolution"
+            )
+
         already_refunded = int(campaign["refunded_wei"])
-        withheld = budget - released - already_refunded
+        withheld = int(campaign["escrowed_wei"])
         if withheld > 0:
-            self._pay(actor, withheld)
+            self._pay_from(campaign, actor, withheld)
             campaign["refunded_wei"] = str(already_refunded + withheld)
             record = self._advertiser_load(actor)
             record["refunded_wei"] = str(int(record["refunded_wei"]) + withheld)
@@ -445,13 +505,11 @@ class Placard(gl.Contract):
         record["placements_removed"] = int(record["placements_removed"]) + 1
         self._publisher_save(record)
 
-        budget = int(campaign["budget_wei"])
-        released = int(campaign["released_wei"])
         already_refunded = int(campaign["refunded_wei"])
-        remaining = budget - released - already_refunded
+        remaining = int(campaign["escrowed_wei"])
         if remaining > 0:
             advertiser = campaign["advertiser"]
-            self._pay(advertiser, remaining)
+            self._pay_from(campaign, advertiser, remaining)
             campaign["refunded_wei"] = str(already_refunded + remaining)
             record = self._advertiser_load(advertiser)
             record["refunded_wei"] = str(int(record["refunded_wei"]) + remaining)
@@ -498,8 +556,23 @@ class Placard(gl.Contract):
             raise gl.vm.UserError(ERROR_EXPECTED + " Campaign is not open")
 
         index = int(placement["periods_submitted"]) + 1
-        if int(campaign["periods_paid"]) + int(campaign["periods_failed"]) >= int(campaign["periods_total"]):
-            raise gl.vm.UserError(ERROR_EXPECTED + " Campaign has no periods left to run")
+        # Pending periods count against the budget exactly like decided ones.
+        # Counting only decided ones let a publisher open more periods than the
+        # campaign has, leave them all undecided, and then collect a share for
+        # every one out of value belonging to other campaigns.
+        committed = (
+            int(campaign["periods_paid"])
+            + int(campaign["periods_failed"])
+            + int(campaign["periods_pending"])
+        )
+        if committed >= int(campaign["periods_total"]):
+            raise gl.vm.UserError(
+                ERROR_EXPECTED + " Campaign has no periods left to run, "
+                + str(committed) + " of " + str(campaign["periods_total"])
+                + " are already decided or awaiting a decision"
+            )
+        campaign["periods_pending"] = int(campaign["periods_pending"]) + 1
+        self._save_campaign(campaign)
 
         period_id = str(int(self.period_count))
         self._save_period({
@@ -633,6 +706,17 @@ class Placard(gl.Contract):
 
         placement = self._load_placement(period["placement_id"])
         campaign = self._load_campaign(period["campaign_id"])
+        # A period left behind after its campaign closed, was refunded, or had
+        # its placement removed must not be able to pay out. The refund has
+        # already gone back to the advertiser, so the only value left to draw on
+        # would be another campaign's.
+        if campaign["status"] != STATUS_OPEN:
+            raise gl.vm.UserError(
+                ERROR_EXPECTED + " Campaign is " + str(campaign["status"])
+                + " and its periods can no longer be verified"
+            )
+        if placement["status"] != PLACEMENT_ACTIVE:
+            raise gl.vm.UserError(ERROR_EXPECTED + " Placement is no longer active")
 
         try:
             def run() -> str:
@@ -691,8 +775,9 @@ class Placard(gl.Contract):
             period["paid_wei"] = str(paid)
             self._reindex_period_status(period_id, PERIOD_SUBMITTED, PERIOD_PASSED)
 
-            self._pay(placement["publisher"], paid)
+            self._pay_from(campaign, placement["publisher"], paid)
             campaign["periods_paid"] = int(campaign["periods_paid"]) + 1
+            campaign["periods_pending"] = max(0, int(campaign["periods_pending"]) - 1)
             campaign["released_wei"] = str(int(campaign["released_wei"]) + paid)
 
             placement["periods_passed"] = int(placement["periods_passed"]) + 1
@@ -713,6 +798,7 @@ class Placard(gl.Contract):
             self._reindex_period_status(period_id, PERIOD_SUBMITTED, PERIOD_FAILED)
 
             campaign["periods_failed"] = int(campaign["periods_failed"]) + 1
+            campaign["periods_pending"] = max(0, int(campaign["periods_pending"]) - 1)
 
             placement["periods_failed"] = int(placement["periods_failed"]) + 1
             placement["strikes"] = int(placement["strikes"]) + strike_weight
@@ -744,28 +830,44 @@ class Placard(gl.Contract):
     @gl.public.write.payable
     def dispute_period(self, period_id: str, argument: str, counter_evidence_url: str) -> None:
         period_id = _cid(period_id)
-        period = self._load_period(period_id)
+        # Looked up without the raising helper: a missing record inside a payable
+        # method would abort before the refusal path could return the bond, and
+        # the caller's value would stay here.
+        raw_period = self.periods.get(period_id, None)
+        if raw_period is None:
+            return self._refuse_payable(" Period not found: " + str(period_id))
+        period = json.loads(raw_period)
         if period["status"] != PERIOD_FAILED:
-            raise gl.vm.UserError(ERROR_EXPECTED + " Only a failed period may be disputed")
+            return self._refuse_payable(" Only a failed period may be disputed")
         # An upheld dispute puts the period back to FAILED, which would otherwise
         # let the same publisher reopen a settled question round after round until
         # one went their way. The bond alone is weak protection, since a win
         # returns both the bond and the period share.
         if bool(period.get("disputed_once", False)):
-            raise gl.vm.UserError(ERROR_EXPECTED + " This period has already been through a dispute round")
+            return self._refuse_payable(" This period has already been through a dispute round")
 
-        placement = self._load_placement(period["placement_id"])
+        raw_placement = self.placements.get(period["placement_id"], None)
+        if raw_placement is None:
+            return self._refuse_payable(" Placement not found for this period")
+        placement = json.loads(raw_placement)
         actor = _addr(gl.message.sender_address.as_hex)
         if actor != placement["publisher"]:
-            raise gl.vm.UserError(ERROR_EXPECTED + " Only this placement's publisher may dispute the period")
+            return self._refuse_payable(" Only this placement's publisher may dispute the period")
 
-        campaign = self._load_campaign(period["campaign_id"])
+        raw_campaign = self.campaigns.get(period["campaign_id"], None)
+        if raw_campaign is None:
+            return self._refuse_payable(" Campaign not found for this period")
+        campaign = json.loads(raw_campaign)
+        # A dispute can turn a failed period back into a payout, so it may only
+        # be opened while the campaign still holds the escrow that would fund it.
+        if campaign["status"] != STATUS_OPEN:
+            return self._refuse_payable(" Campaign is " + str(campaign["status"])
+                + " and its periods can no longer be disputed"
+            )
         bond_required = int(campaign["per_period_wei"])
         bond_paid = int(gl.message.value)
         if bond_paid < bond_required:
-            raise gl.vm.UserError(
-                ERROR_EXPECTED + " The dispute bond must equal the period's share, " + str(bond_required) + " wei"
-            )
+            return self._refuse_payable(" The dispute bond must equal the period's share, " + str(bond_required) + " wei")
 
         dispute_id = str(int(self.dispute_count))
         self._save_dispute({
@@ -791,6 +893,11 @@ class Placard(gl.Contract):
         period["disputed_once"] = True
         self._reindex_period_status(period_id, PERIOD_FAILED, PERIOD_DISPUTED)
         self._save_period(period)
+
+        # A live dispute is undecided work again, so it counts as pending and
+        # blocks the advertiser from closing the campaign out from under it.
+        campaign["periods_pending"] = int(campaign["periods_pending"]) + 1
+        self._save_campaign(campaign)
 
         self._audit("DISPUTE", dispute_id, "DISPUTE_OPENED", actor, str(argument)[:200])
 
@@ -866,6 +973,13 @@ class Placard(gl.Contract):
         period = self._load_period(dispute["period_id"])
         placement = self._load_placement(dispute["placement_id"])
         campaign = self._load_campaign(dispute["campaign_id"])
+        # Same reason as opening one: an overturned finding pays out, and after
+        # closure or refund this campaign no longer holds anything to pay from.
+        if campaign["status"] != STATUS_OPEN:
+            raise gl.vm.UserError(
+                ERROR_EXPECTED + " Campaign is " + str(campaign["status"])
+                + " and its disputes can no longer be resolved"
+            )
 
         def run() -> str:
             task = self._dispute_task(campaign, placement, period, dispute)
@@ -909,8 +1023,16 @@ class Placard(gl.Contract):
             self._reindex_period_status(dispute["period_id"], PERIOD_DISPUTED, PERIOD_OVERTURNED)
             self._save_period(period)
 
+            # The period share is charged to this campaign's escrow. The bond is
+            # the publisher's own money held aside for the dispute, so it is
+            # never charged against the campaign. Both are owed to the same
+            # address, so they leave as one transfer: two transfers to the same
+            # address in a single transaction do not both land, and splitting
+            # them silently kept the bond in the contract.
+            self._charge_escrow(campaign, paid)
             self._pay(placement["publisher"], paid + bond)
             campaign["periods_paid"] = int(campaign["periods_paid"]) + 1
+            campaign["periods_pending"] = max(0, int(campaign["periods_pending"]) - 1)
             campaign["periods_failed"] = max(0, int(campaign["periods_failed"]) - 1)
             campaign["released_wei"] = str(int(campaign["released_wei"]) + paid)
             self._save_campaign(campaign)
@@ -931,6 +1053,12 @@ class Placard(gl.Contract):
             period["status"] = PERIOD_FAILED
             self._reindex_period_status(dispute["period_id"], PERIOD_DISPUTED, PERIOD_FAILED)
             self._save_period(period)
+
+            # The dispute is decided, so the period stops blocking closure. The
+            # bond is the publisher's own money and is forfeited directly, never
+            # charged against the campaign's escrow.
+            campaign["periods_pending"] = max(0, int(campaign["periods_pending"]) - 1)
+            self._save_campaign(campaign)
 
             self._pay(campaign["advertiser"], bond)
 

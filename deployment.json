@@ -2,55 +2,49 @@
   "name": "Placard",
   "contract": "placard.py",
   "class": "Placard",
-  "address": "0x854404e3Aa698829117D546b51Cda0a367678aF5",
+  "address": "0x3D749Aa486D9ecdA9e810dcA73CA2f138AD22DEB",
   "network": "studionet",
   "chain_id": 61999,
   "rpc": "https://studio.genlayer.com/api",
-  "explorer": "https://explorer-studio.genlayer.com/address/0x854404e3Aa698829117D546b51Cda0a367678aF5",
-  "admin": "0x8AA638e465b8dEe14f18bC1cc266Ad65965B6dAB",
+  "explorer": "https://explorer-studio.genlayer.com/address/0x3D749Aa486D9ecdA9e810dcA73CA2f138AD22DEB",
   "frontend": "placard-app",
+  "regression_suite": "tests/placard_regression.mjs",
   "consensus_rounds": [
     "verify_period: binds verdict, ad_present, safety_breach and severity",
     "resolve_dispute: binds outcome and evidence_supports_publisher"
   ],
+  "solvency": {
+    "per_campaign_escrow_field": "escrowed_wei",
+    "pending_work_field": "periods_pending",
+    "rules": [
+      "pending periods count against the budget alongside decided ones",
+      "close_campaign is refused while periods_pending is above zero",
+      "verify_period, submit_period, dispute_period and resolve_dispute all require the campaign to be OPEN",
+      "every payout is charged to its own campaign's escrowed_wei and raises on a shortfall",
+      "payable methods never raise once value is attached, they refund through _refuse_payable"
+    ]
+  },
   "verified_on_chain": {
     "advertiser": "0x80519c53f10d731e4ff83a7d9acd69cf98da6258",
     "publisher": "0x0b57877ec84d96b672cd47d8ea4424283fdb9f6c",
-    "budget_wei": "3000000000000000000",
-    "per_period_wei": "1000000000000000000",
-    "period_0": {
-      "evidence_url": "https://github.com/vercel/next.js",
-      "verdict": "PASS",
-      "ad_present": true,
-      "safety_breach": false,
-      "severity": "NONE",
-      "paid_wei": "1000000000000000000"
-    },
-    "period_1": {
-      "evidence_url": "https://en.wikipedia.org/wiki/Sports_betting",
-      "verdict": "FAIL",
-      "ad_present": false,
-      "safety_breach": true,
-      "severity": "SEVERE",
-      "strike_weight": 2
-    },
-    "dispute_0": {
-      "period_id": "1",
-      "outcome": "OVERTURNED",
-      "evidence_supports_publisher": true,
-      "bond_wei": "1000000000000000000",
-      "bond_returned": true
-    },
-    "settlement": {
+    "regression": {"checks": 22, "passed": 22, "failed": 0},
+    "campaign_1": {
+      "budget_wei": "2000000000000000000",
+      "period_2": {"evidence_url": "https://github.com/vercel/next.js", "verdict": "PASS", "severity": "NONE", "paid_wei": "1000000000000000000"},
+      "period_3": {"evidence_url": "https://en.wikipedia.org/wiki/Sports_betting", "verdict": "FAIL", "safety_breach": true, "severity": "SEVERE", "strike_weight": 2},
+      "dispute_0": {"outcome": "OVERTURNED", "bond_wei": "1000000000000000000", "bond_returned": true},
       "released_wei": "2000000000000000000",
-      "refunded_wei": "1000000000000000000",
-      "contract_balance_wei": "0",
+      "escrowed_wei": "0",
       "status": "CLOSED"
     },
-    "audit_entries": 9
+    "contract_balance_wei": "0",
+    "audit_entries": 17
   },
   "superseded_deployments": [
     "0x111d83d3AfE6b0CCaB825006867D059D7366935E",
-    "0xB40ff0919f2A151Ef6739eF4ccDeaB30B6C026F1"
+    "0xB40ff0919f2A151Ef6739eF4ccDeaB30B6C026F1",
+    "0x854404e3Aa698829117D546b51Cda0a367678aF5",
+    "0x1A116137880388fDbaaB7823f9A1270fbBb3F13e",
+    "0x822d4222BD2102121f2fAE90b5B5bC34581557e3"
   ]
 }
