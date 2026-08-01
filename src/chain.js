@@ -47,12 +47,45 @@ export async function ensureStudionet() {
   }
 }
 
+// genlayer-js fills in nonce, gas, gasPrice, type and chainId itself and hands
+// the wallet a fully specified legacy transaction. Wallets are picky about
+// exactly those fields: a zero gas price, a caller supplied nonce and a chainId
+// inside the parameters are each known to draw an invalid parameters error, and
+// the wallet never says which one it disliked.
+//
+// So the wallet is given only what it cannot work out for itself, and left to
+// compute the rest. If it still refuses, the gas price is dropped as well and
+// the send is tried once more, because a gasless chain quoting zero is the most
+// likely thing for a wallet to object to.
+const WALLET_COMPUTES = ['nonce', 'gas', 'type', 'chainId'];
+
+function walletFriendly(provider) {
+  return {
+    ...provider,
+    request: async (payload) => {
+      if (payload?.method !== 'eth_sendTransaction') return provider.request(payload);
+      const original = payload.params?.[0] ?? {};
+      const trimmed = { ...original };
+      for (const key of WALLET_COMPUTES) delete trimmed[key];
+      try {
+        return await provider.request({ method: 'eth_sendTransaction', params: [trimmed] });
+      } catch (err) {
+        const code = err?.code;
+        if (code !== -32602 || trimmed.gasPrice === undefined) throw err;
+        const withoutPrice = { ...trimmed };
+        delete withoutPrice.gasPrice;
+        return provider.request({ method: 'eth_sendTransaction', params: [withoutPrice] });
+      }
+    },
+  };
+}
+
 export async function connect() {
   if (!window.ethereum) throw new Error('No browser wallet found. Install MetaMask to sign transactions.');
   const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
   account = accounts[0];
   await ensureStudionet();
-  writeClient = createClient({ chain: studionet, account, provider: window.ethereum });
+  writeClient = createClient({ chain: studionet, account, provider: walletFriendly(window.ethereum) });
   return account;
 }
 
