@@ -83,15 +83,20 @@ function busy(msg = 'Reading contract state') {
 }
 
 async function action(btn, fn, okMsg) {
-  const host = btn.closest('.card, .wrap') || btn.parentElement;
-  let noteEl = host.querySelector('.note.live');
-  if (!noteEl) {
+  // The note goes immediately after the row holding the button, not at the end
+  // of the panel. Appending it to the panel put it below the campaign list,
+  // where a click looked like it had done nothing at all: the feedback existed
+  // but was hundreds of pixels off screen.
+  const anchor = btn.closest('.row') || btn;
+  let noteEl = anchor.nextElementSibling;
+  if (!noteEl || !noteEl.classList || !noteEl.classList.contains('live')) {
     noteEl = document.createElement('div');
     noteEl.className = 'note live';
-    host.appendChild(noteEl);
+    anchor.insertAdjacentElement('afterend', noteEl);
   }
   noteEl.className = 'note live';
   noteEl.innerHTML = '<span class="spin"></span> &nbsp;Submitting, then waiting for consensus…';
+  noteEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   try {
     const hash = await fn();
     noteEl.className = 'note live ok';
@@ -99,8 +104,27 @@ async function action(btn, fn, okMsg) {
       Validators settle in about a minute. Refresh the view then.`;
   } catch (err) {
     noteEl.className = 'note live err';
-    noteEl.innerHTML = esc(err?.shortMessage || err?.message || String(err));
+    const raw = String(err?.shortMessage || err?.message || err);
+    noteEl.innerHTML = raw === 'Connect a wallet first.'
+      ? 'Connect a wallet first, using the button at the top right. This action sends a transaction, so it has to be signed.'
+      : esc(raw);
   }
+  noteEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+// Rendered at the top of any tab that can send a transaction, so the state is
+// visible before a button is pressed rather than after.
+function walletBanner() {
+  if (currentAccount()) return '';
+  if (typeof window.ethereum === 'undefined') {
+    return `<div class="note err" style="margin-bottom:16px">
+      No browser wallet detected. Reading this page needs nothing, but opening a campaign,
+      enrolling a placement or disputing a period all send transactions and need a wallet
+      such as MetaMask, connected to GenLayer Studionet.</div>`;
+  }
+  return `<div class="note" style="margin-bottom:16px">
+    Wallet not connected. Use <strong>Connect wallet</strong> at the top right before
+    sending anything from this page.</div>`;
 }
 
 // ----------------------------------------------------------------- overview
@@ -188,6 +212,7 @@ async function viewCampaigns() {
   const campaigns = await read('get_recent_campaigns', ['50']);
   el('view').innerHTML = `
     <h2>Campaigns</h2>
+    ${walletBanner()}
     <p class="lede">Opening a campaign escrows the whole budget in the contract and splits it into equal
     periods. The safety rules you write here are the rules every verification round is judged against, so
     they are stored on chain exactly as typed. Any remainder from the division is added to the final period
@@ -248,6 +273,7 @@ async function viewPlacements() {
 
   el('view').innerHTML = `
     <h2>Placements</h2>
+    ${walletBanner()}
     <p class="lede">A publisher enrols a placement on a campaign and then submits one live URL per period.
     The publisher of a placement is whoever enrolled it, and only that address may submit or dispute its
     periods. Each submission opens a fresh consensus round over the page as it stands right now.</p>
@@ -353,6 +379,7 @@ async function viewVerification() {
 
   el('view').innerHTML = `
     <h2>Verification</h2>
+    ${walletBanner()}
     <p class="lede">Each round fetches the evidence page with render in text mode and asks for four bound
     facts: whether the ad is present, whether the page breaches the safety rules, how severe that breach is,
     and the verdict derived from the first two. Validators must match on all four, because the verdict moves
