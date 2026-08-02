@@ -90,8 +90,42 @@ export async function connect() {
 }
 
 /** Read a view method. Every view on this contract returns a JSON string. */
+// Studionet refuses work under load with "Server busy: all 8 execution slots
+// occupied", which viem surfaces as "Version of JSON-RPC protocol is not
+// supported". It also drops connections, returns an HTML error page in place of
+// JSON, and rate limits by the hour. None of that is a fault in the contract or
+// the query, and all of it clears on its own, so a read retries rather than
+// putting an alarming protocol error in front of the reader.
+function isTransient(err) {
+  const text = [err?.shortMessage, err?.message, err?.details, err?.cause?.message]
+    .filter(Boolean).join(' | ');
+  const code = err?.code ?? err?.cause?.code;
+  return code === -32006 || code === -32029 || code === -32603
+    || /Server busy|execution slots|JSON-RPC protocol is not supported|fetch failed|Failed to fetch|NetworkError|rate limit|Unexpected token/i.test(text);
+}
+
+async function withRetry(label, fn, attempts = 4) {
+  let last;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!isTransient(err)) throw err;
+      last = err;
+      if (i < attempts) await new Promise((r) => setTimeout(r, 700 * i * i));
+    }
+  }
+  const e = new Error(
+    'GenLayer Studionet is busy or unreachable right now, so this could not be read. '
+    + 'It usually clears within a minute. Nothing is wrong with the contract.'
+  );
+  e.cause = last;
+  throw e;
+}
+
 export async function read(functionName, args = []) {
-  const raw = await readClient.readContract({ address: CONTRACT, functionName, args });
+  const raw = await withRetry(functionName, () =>
+    readClient.readContract({ address: CONTRACT, functionName, args }));
   if (typeof raw !== 'string') return raw;
   try {
     return JSON.parse(raw);
