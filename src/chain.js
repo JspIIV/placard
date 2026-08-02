@@ -1,7 +1,7 @@
 import { createClient } from 'genlayer-js';
 import { studionet } from 'genlayer-js/chains';
 
-export const CONTRACT = '0x3D749Aa486D9ecdA9e810dcA73CA2f138AD22DEB';
+export const CONTRACT = '0x5491b037E5AbaFEbBc5Fc5F3fFA765322a9c482d';
 
 let readClient = createClient({ chain: studionet });
 let writeClient = null;

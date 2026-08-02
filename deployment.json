@@ -2,13 +2,16 @@
   "name": "Placard",
   "contract": "placard.py",
   "class": "Placard",
-  "address": "0x3D749Aa486D9ecdA9e810dcA73CA2f138AD22DEB",
+  "address": "0x5491b037E5AbaFEbBc5Fc5F3fFA765322a9c482d",
   "network": "studionet",
   "chain_id": 61999,
   "rpc": "https://studio.genlayer.com/api",
-  "explorer": "https://explorer-studio.genlayer.com/address/0x3D749Aa486D9ecdA9e810dcA73CA2f138AD22DEB",
+  "explorer": "https://explorer-studio.genlayer.com/address/0x5491b037E5AbaFEbBc5Fc5F3fFA765322a9c482d",
   "frontend": "placard-app",
-  "regression_suite": "tests/placard_regression.mjs",
+  "regression_suite": [
+    "tests/placard_regression.mjs",
+    "tests/placard_lifecycle.mjs"
+  ],
   "consensus_rounds": [
     "verify_period: binds verdict, ad_present, safety_breach and severity",
     "resolve_dispute: binds outcome and evidence_supports_publisher"
@@ -21,30 +24,65 @@
       "close_campaign is refused while periods_pending is above zero",
       "verify_period, submit_period, dispute_period and resolve_dispute all require the campaign to be OPEN",
       "every payout is charged to its own campaign's escrowed_wei and raises on a shortfall",
-      "payable methods never raise once value is attached, they refund through _refuse_payable"
+      "payable methods never raise once value is attached, they refund through _refuse_payable",
+      "removal never sweeps escrow that a pending period or a live dispute still claims",
+      "a refund owed at removal is deferred and released when the last pending item settles",
+      "work already in flight stays verifiable after a placement is removed, so nothing can be stranded",
+      "the division remainder is flagged when paid, so it can be handed over only once"
     ]
   },
   "verified_on_chain": {
     "advertiser": "0x80519c53f10d731e4ff83a7d9acd69cf98da6258",
     "publisher": "0x0b57877ec84d96b672cd47d8ea4424283fdb9f6c",
-    "regression": {"checks": 22, "passed": 22, "failed": 0},
+    "regression": {
+      "solvency_checks": 22,
+      "lifecycle_checks": 21,
+      "passed": 43,
+      "failed": 0
+    },
     "campaign_1": {
       "budget_wei": "2000000000000000000",
-      "period_2": {"evidence_url": "https://github.com/vercel/next.js", "verdict": "PASS", "severity": "NONE", "paid_wei": "1000000000000000000"},
-      "period_3": {"evidence_url": "https://en.wikipedia.org/wiki/Sports_betting", "verdict": "FAIL", "safety_breach": true, "severity": "SEVERE", "strike_weight": 2},
-      "dispute_0": {"outcome": "OVERTURNED", "bond_wei": "1000000000000000000", "bond_returned": true},
+      "period_2": {
+        "evidence_url": "https://github.com/vercel/next.js",
+        "verdict": "PASS",
+        "severity": "NONE",
+        "paid_wei": "1000000000000000000"
+      },
+      "period_3": {
+        "evidence_url": "https://en.wikipedia.org/wiki/Sports_betting",
+        "verdict": "FAIL",
+        "safety_breach": true,
+        "severity": "SEVERE",
+        "strike_weight": 2
+      },
+      "dispute_0": {
+        "outcome": "OVERTURNED",
+        "bond_wei": "1000000000000000000",
+        "bond_returned": true
+      },
       "released_wei": "2000000000000000000",
       "escrowed_wei": "0",
       "status": "CLOSED"
     },
     "contract_balance_wei": "0",
-    "audit_entries": 17
+    "audit_entries": 17,
+    "non_divisible_budget": {
+      "budget_wei": "2000000000000000000",
+      "periods": 3,
+      "per_period_wei": "666666666666666666",
+      "remainder_wei": "2",
+      "released_wei": "666666666666666666",
+      "refunded_wei": "1333333333333333334"
+    }
   },
   "superseded_deployments": [
     "0x111d83d3AfE6b0CCaB825006867D059D7366935E",
     "0xB40ff0919f2A151Ef6739eF4ccDeaB30B6C026F1",
     "0x854404e3Aa698829117D546b51Cda0a367678aF5",
     "0x1A116137880388fDbaaB7823f9A1270fbBb3F13e",
-    "0x822d4222BD2102121f2fAE90b5B5bC34581557e3"
+    "0x822d4222BD2102121f2fAE90b5B5bC34581557e3",
+    "0x3D749Aa486D9ecdA9e810dcA73CA2f138AD22DEB",
+    "0x055cB1c7714bE38a53438D483114c9866bA16857",
+    "0x50074FdEdC27647f3a8AeF03Cf054Bd99184d7ce"
   ]
 }

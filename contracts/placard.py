@@ -201,10 +201,10 @@ class Placard(gl.Contract):
         # it. A shortfall is a bug and must stop the transaction rather than
         # quietly draining a neighbour.
         #
-        # This is split from the transfer because a settlement can owe one
-        # address both a period share and a returned bond, and those must leave
-        # as a single transfer. Two transfers to the same address in one
-        # transaction do not both land.
+        # Charging is split from paying because a settlement can owe one address
+        # both a period share and a returned bond. Those are added up and sent
+        # once, so the accounting and the transfer stay easy to follow and to
+        # audit against the balance.
         amount_int = int(amount)
         if amount_int <= 0:
             return
@@ -345,6 +345,17 @@ class Placard(gl.Contract):
             # a payout. Without this, a publisher could submit more periods than
             # the campaign has, wait, and then collect a share for every one.
             "periods_pending": 0,
+            # The division remainder is owed to exactly one period, and this
+            # records that it has been handed over. Without it a period could
+            # take the remainder on its verification and a different period
+            # could take it again when a dispute overturned that one, paying
+            # the same wei out twice.
+            "remainder_paid": False,
+            # Set when a placement is removed while work is still in flight.
+            # The refund cannot happen yet, because the pending periods and any
+            # live dispute still have a claim on this escrow, so it is deferred
+            # until the last of them settles.
+            "refund_when_settled": False,
             # What this campaign still holds. Every payout is checked against it
             # and subtracts from it, so one campaign can never spend value
             # escrowed by another, whatever else goes wrong.
@@ -492,6 +503,38 @@ class Placard(gl.Contract):
         self._publisher_save(record)
 
         self._audit("PLACEMENT", placement_id, "PLACEMENT_REMOVED", actor, "manual removal by advertiser")
+        # Removal stops new submissions. It never sweeps the escrow, because a
+        # period already submitted, or a dispute already bonded, still has a
+        # claim on it. close_campaign is the way out, and it waits for those.
+
+    def _settle_pending_down(self, campaign: dict) -> None:
+        """Decrement pending work and release a deferred refund once it is zero.
+
+        Called at the end of every settlement. A refund deferred by a removal
+        cannot happen while anything is still undecided, so this is the single
+        place that notices the last one has landed.
+        """
+        campaign["periods_pending"] = max(0, int(campaign["periods_pending"]) - 1)
+        if not bool(campaign.get("refund_when_settled", False)):
+            return
+        if int(campaign["periods_pending"]) > 0:
+            return
+        remaining = int(campaign["escrowed_wei"])
+        advertiser = campaign["advertiser"]
+        if remaining > 0:
+            self._pay_from(campaign, advertiser, remaining)
+            campaign["refunded_wei"] = str(int(campaign["refunded_wei"]) + remaining)
+            record = self._advertiser_load(advertiser)
+            record["refunded_wei"] = str(int(record["refunded_wei"]) + remaining)
+            self._advertiser_save(record)
+        campaign["refund_when_settled"] = False
+        if campaign["status"] == STATUS_OPEN:
+            campaign["status"] = STATUS_REFUNDED
+            self._reindex_campaign_status(campaign["campaign_id"], STATUS_OPEN, STATUS_REFUNDED)
+        self._audit(
+            "CAMPAIGN", campaign["campaign_id"], "DEFERRED_REFUND_RELEASED",
+            advertiser, "remaining=" + str(remaining),
+        )
 
     def _auto_remove_and_refund(self, placement: dict, campaign: dict) -> None:
         # A publisher who has now failed strike_limit periods is removed and the
@@ -504,6 +547,22 @@ class Placard(gl.Contract):
         record["placements_active"] = max(0, int(record["placements_active"]) - 1)
         record["placements_removed"] = int(record["placements_removed"]) + 1
         self._publisher_save(record)
+
+        # The refund only happens now if nothing is still undecided. A period
+        # awaiting its round, or a bonded dispute, still has a claim on this
+        # escrow: paying the advertiser out from under it would leave the later
+        # settlement with nothing to draw on, and would leave a dispute bond
+        # with no way home. In that case the refund is deferred and released by
+        # _settle_pending_down when the last of them lands.
+        if int(campaign["periods_pending"]) > 0:
+            campaign["refund_when_settled"] = True
+            self._save_campaign(campaign)
+            self._audit(
+                "CAMPAIGN", campaign["campaign_id"], "REFUND_DEFERRED_PENDING_WORK",
+                placement["publisher"],
+                "pending=" + str(campaign["periods_pending"]),
+            )
+            return
 
         already_refunded = int(campaign["refunded_wei"])
         remaining = int(campaign["escrowed_wei"])
@@ -715,8 +774,11 @@ class Placard(gl.Contract):
                 ERROR_EXPECTED + " Campaign is " + str(campaign["status"])
                 + " and its periods can no longer be verified"
             )
-        if placement["status"] != PLACEMENT_ACTIVE:
-            raise gl.vm.UserError(ERROR_EXPECTED + " Placement is no longer active")
+        # A removed placement deliberately does NOT block this. Removal stops
+        # new submissions, it does not abandon work already in flight: a period
+        # submitted before the removal still has a claim on the escrow, and
+        # refusing to verify it would leave it pending forever, which in turn
+        # would block close_campaign and lock the budget for good.
 
         try:
             def run() -> str:
@@ -765,11 +827,17 @@ class Placard(gl.Contract):
         if result["verdict"] == "PASS":
             per_period = int(campaign["per_period_wei"])
             paid = per_period
+            # The remainder rides on whichever period settles last, and the
+            # flag is what stops it riding on two of them. Without it a period
+            # could take it here and a later overturned dispute could take it
+            # again, paying the same wei twice out of an escrow that only ever
+            # held it once.
             is_last = (int(campaign["periods_paid"]) + int(campaign["periods_failed"]) + 1) >= int(
                 campaign["periods_total"]
             )
-            if is_last:
+            if is_last and not bool(campaign.get("remainder_paid", False)):
                 paid += int(campaign["remainder_wei"])
+                campaign["remainder_paid"] = True
 
             period["status"] = PERIOD_PASSED
             period["paid_wei"] = str(paid)
@@ -777,8 +845,8 @@ class Placard(gl.Contract):
 
             self._pay_from(campaign, placement["publisher"], paid)
             campaign["periods_paid"] = int(campaign["periods_paid"]) + 1
-            campaign["periods_pending"] = max(0, int(campaign["periods_pending"]) - 1)
             campaign["released_wei"] = str(int(campaign["released_wei"]) + paid)
+            self._settle_pending_down(campaign)
 
             placement["periods_passed"] = int(placement["periods_passed"]) + 1
             placement["earned_wei"] = str(int(placement["earned_wei"]) + paid)
@@ -798,7 +866,7 @@ class Placard(gl.Contract):
             self._reindex_period_status(period_id, PERIOD_SUBMITTED, PERIOD_FAILED)
 
             campaign["periods_failed"] = int(campaign["periods_failed"]) + 1
-            campaign["periods_pending"] = max(0, int(campaign["periods_pending"]) - 1)
+            self._settle_pending_down(campaign)
 
             placement["periods_failed"] = int(placement["periods_failed"]) + 1
             placement["strikes"] = int(placement["strikes"]) + strike_weight
@@ -1016,7 +1084,10 @@ class Placard(gl.Contract):
             is_last = (int(campaign["periods_paid"]) + int(campaign["periods_failed"])) >= int(
                 campaign["periods_total"]
             )
-            paid = per_period + (int(campaign["remainder_wei"]) if is_last else 0)
+            paid = per_period
+            if is_last and not bool(campaign.get("remainder_paid", False)):
+                paid += int(campaign["remainder_wei"])
+                campaign["remainder_paid"] = True
 
             period["status"] = PERIOD_OVERTURNED
             period["paid_wei"] = str(paid)
@@ -1026,15 +1097,13 @@ class Placard(gl.Contract):
             # The period share is charged to this campaign's escrow. The bond is
             # the publisher's own money held aside for the dispute, so it is
             # never charged against the campaign. Both are owed to the same
-            # address, so they leave as one transfer: two transfers to the same
-            # address in a single transaction do not both land, and splitting
-            # them silently kept the bond in the contract.
+            # address, so they are added up and sent as one transfer.
             self._charge_escrow(campaign, paid)
             self._pay(placement["publisher"], paid + bond)
             campaign["periods_paid"] = int(campaign["periods_paid"]) + 1
-            campaign["periods_pending"] = max(0, int(campaign["periods_pending"]) - 1)
             campaign["periods_failed"] = max(0, int(campaign["periods_failed"]) - 1)
             campaign["released_wei"] = str(int(campaign["released_wei"]) + paid)
+            self._settle_pending_down(campaign)
             self._save_campaign(campaign)
 
             placement["periods_passed"] = int(placement["periods_passed"]) + 1
@@ -1057,7 +1126,7 @@ class Placard(gl.Contract):
             # The dispute is decided, so the period stops blocking closure. The
             # bond is the publisher's own money and is forfeited directly, never
             # charged against the campaign's escrow.
-            campaign["periods_pending"] = max(0, int(campaign["periods_pending"]) - 1)
+            self._settle_pending_down(campaign)
             self._save_campaign(campaign)
 
             self._pay(campaign["advertiser"], bond)

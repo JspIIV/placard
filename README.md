@@ -4,57 +4,60 @@ An ad campaign that pays out period by period, and only for periods a validator 
 
 An advertiser escrows the whole budget and writes the brand safety rules in plain words. A publisher enrols a placement and submits the live placement URL once per period. Each submission opens a fresh consensus round in which GenLayer validators fetch that page themselves and rule on it. A pass releases that period's share of the budget to the publisher, a fail withholds it, and a publisher who accumulates enough strikes is removed and the whole remaining budget goes straight back to the advertiser.
 
-* **Contract:** [`0x3D749Aa486D9ecdA9e810dcA73CA2f138AD22DEB`](https://explorer-studio.genlayer.com/address/0x3D749Aa486D9ecdA9e810dcA73CA2f138AD22DEB) on GenLayer Studionet
+* **Contract:** [`0x5491b037E5AbaFEbBc5Fc5F3fFA765322a9c482d`](https://explorer-studio.genlayer.com/address/0x5491b037E5AbaFEbBc5Fc5F3fFA765322a9c482d) on GenLayer Studionet
 * **Contract source:** [`contracts/placard.py`](contracts/placard.py)
-* **Regression suite:** [`tests/placard_regression.mjs`](tests/placard_regression.mjs)
+* **Regression suites:** [`tests/placard_regression.mjs`](tests/placard_regression.mjs) and [`tests/placard_lifecycle.mjs`](tests/placard_lifecycle.mjs), 43 checks
 
 ## Verified on chain
 
-A campaign was run from opening to settlement between two separate addresses, advertiser `0x80519c...da6258` and publisher `0x0b5787...db9f6c`, with real GEN moving. Two GEN escrowed across two periods, one GEN each. A second campaign sat alongside it throughout, so every step also had to leave a neighbour's escrow alone.
+Everything below was produced by two suites run against the deployment linked
+above, between two separate addresses, advertiser `0x80519c...da6258` and
+publisher `0x0b5787...db9f6c`, with real GEN moving. **43 checks, 43 passing.**
 
-**A period passed and the money was released.** The campaign bought a promotional presentation of the Next.js brand on the project page its own team publishes and controls. The publisher submitted `https://github.com/vercel/next.js`.
+**A period passed and the money was released.** The campaign bought a promotional
+presentation of the Next.js brand on the project page its own team publishes and
+controls, and the publisher submitted `https://github.com/vercel/next.js`.
+`PASS`, `severity NONE`, one GEN released.
 
-| Field | Value |
+> "The page is the public GitHub repository for vercel/next.js, which is an official project page controlled by the Next.js team and explicitly describes Next.js as The React Framework with README text about building web applications."
+
+Note what the arbiter checked. Not merely that the brand appears somewhere on the
+page, but that the page is the one the placement requirement actually named. That
+clause was written in prose and never parsed by any code.
+
+**A period failed, at the heavier weight.** A Wikipedia article on sports betting
+carries no placement and breaks the campaign's own safety rule. `FAIL`,
+`safety_breach true`, `severity SEVERE`, two strikes rather than one.
+
+> "The retrieved page is a Wikipedia article about sports betting and does not contain the agreed Next.js promotional creative. Its primary subject is sports betting, which violates the campaign-specific rule against placements on gambling content."
+
+Severity is consensus bound precisely because it sets that weight, and the weight
+is what removes a publisher and refunds a budget.
+
+**The strike limit fired while other work was still in flight, and the refund
+waited.** Two strikes hit the limit, so the placement was removed automatically,
+but a second period was still awaiting its round. Its claim on the escrow is
+exactly what a refund must not sweep away, so the refund was deferred, the
+pending period was still verified afterwards, and only then was the remainder
+released. The campaign settled `REFUNDED` with `escrowed_wei` at `0`.
+
+**The arithmetic was checked on a budget that does not divide.** Two GEN across
+three periods is `666666666666666666` each with `2` wei left over. One period was
+paid its share, the rest was refunded, and the two sides add up to the budget to
+the wei:
+
+| | wei |
 |---|---|
-| `verdict` | `PASS` |
-| `ad_present` | `true` |
-| `safety_breach` | `false` |
-| `severity` | `NONE` |
-| `paid_wei` | `1000000000000000000` |
+| released | `666666666666666666` |
+| refunded | `1333333333333333334` |
+| budget | `2000000000000000000` |
 
-> "The page is the official Next.js GitHub repository published by Vercel, and it presents Next.js as the React framework for the web. There is no gambling or betting content on the page, so the campaign safety rules are not breached."
+The remainder can be handed over only once, guarded by a flag on the campaign,
+because a period could otherwise take it on its verification and a later
+overturned dispute could take it again.
 
-Note what the arbiter checked. Not merely that the brand appears somewhere on the page, but that the page is the one the placement requirement actually specified. That clause was written in prose and never parsed by any code.
-
-**A period failed, and failed at the heavier weight.** The publisher then submitted a Wikipedia article on sports betting, which breaks the campaign's own safety rule and carries no placement at all.
-
-| Field | Value |
-|---|---|
-| `verdict` | `FAIL` |
-| `ad_present` | `false` |
-| `safety_breach` | `true` |
-| `severity` | `SEVERE` |
-| `strike_weight` | `2` |
-
-> "The retrieved page is the Wikipedia article on Sports betting, not the official Next.js project page, so the agreed placement is absent. The page's primary subject is sports betting and wagering, which directly violates the campaign-specific safety rule prohibiting placement next to gambling or sports betting content."
-
-Two strikes rather than one, because this is a brand safety breach and not merely an undelivered period. Severity is consensus bound precisely because it sets that weight, and the weight is what removes a publisher and refunds a whole budget.
-
-**The dispute round overturned a finding and corrected the record.** The publisher contested the failure, posting a bond equal to the period share, and offered the official project page as counter evidence.
-
-| Field | Value |
-|---|---|
-| `outcome` | `OVERTURNED` |
-| `evidence_supports_publisher` | `true` |
-| `bond_wei` | `1000000000000000000`, returned |
-
-> "The counter evidence confirms the placement occurred on the official Next.js GitHub repository, which is controlled by the project team. This proves the original FAIL was based on a page submitted in error and that the agreed placement was actually met."
-
-The period's share was released, the two strikes were reversed and the bond came back, leaving the placement at two periods passed, zero failed, zero strikes.
-
-**Everything settled and the contract emptied.** Both campaigns closed, two GEN went to the publisher for the passed periods of this one, the dispute bond went back, and the contract's real balance read from `eth_getBalance` is `0`. Nothing is stranded, and no campaign ever drew on the other's escrow. The audit trail carries seventeen entries with actors and timestamps.
-
-The frontend reads this same contract directly over Studionet JSON-RPC, chain id `0xf22f`, with nothing on the page hardcoded. Overview draws on `get_frontend_bootstrap`, Campaigns on `get_recent_campaigns`, Placements on `get_campaign_placements`, Verification on `get_periods_by_status` across all five period states plus `get_dispute`, and Standing on `get_publisher_record`, `get_advertiser_record`, `get_party_campaigns`, `get_party_placements` and `get_audit_trail`.
+The frontend reads this same contract directly over Studionet JSON-RPC, chain id
+`0xf22f`, with nothing on the page hardcoded.
 
 ## A bug that testing found
 
@@ -86,14 +89,52 @@ A refused payable call reverts the state change but **not** the incoming transfe
 
 So the payable methods here never raise once value is attached. `open_campaign` and `dispute_period` route every refusal through `_refuse_payable`, which returns the value, writes an audit entry saying why, and exits normally. Record lookups inside those methods avoid the raising helpers for the same reason.
 
+### Lifecycle, removal and the remainder
+
+A second review pass raised three more, and all three were real.
+
+**Removal used to sweep the escrow while work was still pending.** When a
+publisher hit the strike limit, the automatic refund sent everything back to the
+advertiser at once. A period still awaiting its round, or a bonded dispute, had a
+claim on that value and lost it. Worse, an earlier fix made verification require
+an active placement, so a period pending at the moment of removal could never be
+verified, `periods_pending` never returned to zero, and `close_campaign` was
+refused forever: the budget was locked with no way out at all.
+
+The rule now is that removal stops new submissions and nothing else. Work already
+in flight stays verifiable, a refund owed at removal is recorded as deferred, and
+`_settle_pending_down` releases it when the last pending item settles. That also
+gives every dispute bond a terminal path, because a campaign can no longer reach
+a terminal state while a bonded dispute is live.
+
+**The remainder could be paid twice.** A budget rarely divides evenly, and the
+leftover rides on whichever period settles last. Both the pass path and the
+overturned dispute path computed that independently, so a period could take the
+remainder and a later overturn could take it again out of an escrow that only
+ever held it once. A `remainder_paid` flag on the campaign now makes it a single
+handover.
+
 ### Regression tests
 
-[`tests/placard_regression.mjs`](tests/placard_regression.mjs) runs against a deployed contract and asserts each of these on chain. 22 checks, covering concurrent pending periods, closure over undecided work, verification and disputes after closure, the neighbouring campaign being untouched, refused payable calls returning their value, and the balance invariant: the contract's real balance must equal what the campaigns say they still hold plus any live dispute bond.
+Two suites, run against the deployment linked above.
+[`tests/placard_regression.mjs`](tests/placard_regression.mjs) covers concurrent
+pending periods, closure over undecided work, verification and disputes after
+closure, the neighbouring campaign being untouched, refused payable calls
+returning their value, and the balance invariant.
+[`tests/placard_lifecycle.mjs`](tests/placard_lifecycle.mjs) covers the strike
+limit firing while a period is pending, settling that period afterwards, the
+deferred refund releasing exactly once, and the remainder on a budget that does
+not divide.
 
-That last check is the one that caught the stranded GEN. The earlier tests all passed while a real leak was open, because they checked the contract's own accounting against itself. Comparing it to `eth_getBalance` is what made the gap visible.
+The balance invariant is the one that catches what the others cannot: the
+contract's real balance read from `eth_getBalance` must equal what every campaign
+says it still holds plus any live dispute bond. Earlier suites all passed while a
+real leak was open, because they only checked the contract's accounting against
+itself.
 
 ```
 22 passed, 0 failed
+21 passed, 0 failed
 ```
 
 ## Why this needs an intelligent contract
