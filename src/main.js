@@ -112,6 +112,43 @@ async function action(btn, fn, okMsg) {
   noteEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
+// Checked before anything is signed. An empty form used to sail straight into a
+// transaction, which either wasted a signature on a refusal or wrote a campaign
+// with no brand, no rules and nothing to judge against.
+class FormError extends Error {}
+
+function required(fields) {
+  const missing = [];
+  const out = {};
+  for (const [id, label] of fields) {
+    const raw = (el(id)?.value ?? '').trim();
+    if (!raw) missing.push(label);
+    out[id] = raw;
+  }
+  if (missing.length) {
+    throw new FormError(missing.length === 1
+      ? `${missing[0]} is required.`
+      : `These are required: ${missing.join(', ')}.`);
+  }
+  return out;
+}
+
+function positiveNumber(id, label) {
+  const raw = (el(id)?.value ?? '').trim();
+  const n = Number(raw);
+  if (!raw || !isFinite(n) || n <= 0) throw new FormError(`${label} must be a number greater than zero.`);
+  return raw;
+}
+
+function httpUrl(id, label) {
+  const raw = (el(id)?.value ?? '').trim();
+  if (!raw) throw new FormError(`${label} is required.`);
+  if (!/^https?:\/\/\S+\.\S+/i.test(raw)) {
+    throw new FormError(`${label} must be a full URL starting with http, since validators have to fetch it.`);
+  }
+  return raw;
+}
+
 // Rendered at the top of any tab that can send a transaction, so the state is
 // visible before a button is pressed rather than after.
 function walletBanner() {
@@ -235,14 +272,23 @@ async function viewCampaigns() {
     <h3>Campaigns on chain</h3>
     <div id="c-list"></div>`;
 
-  el('c-go').onclick = (e) => action(e.target, () => write('open_campaign', [
-    el('c-brand').value,
-    el('c-creative').value,
-    el('c-req').value,
-    el('c-rules').value,
-    el('c-periods').value || '1',
-    el('c-strikes').value || '1',
-  ], toWei(el('c-budget').value)), 'Campaign submitted with the budget escrowed.');
+  el('c-go').onclick = (e) => action(e.target, () => {
+    const f = required([
+      ['c-brand', 'Brand'],
+      ['c-creative', 'Creative description'],
+      ['c-req', 'Placement requirement'],
+      ['c-rules', 'Safety rules'],
+    ]);
+    const periods = positiveNumber('c-periods', 'Periods');
+    const strikes = positiveNumber('c-strikes', 'Strike limit');
+    const budget = positiveNumber('c-budget', 'Budget');
+    if (f['c-rules'].length < 10) {
+      throw new FormError('The safety rules are what every round is judged against, so they need to say something.');
+    }
+    return write('open_campaign', [
+      f['c-brand'], f['c-creative'], f['c-req'], f['c-rules'], periods, strikes,
+    ], toWei(budget));
+  }, 'Campaign submitted with the budget escrowed.');
 
   el('c-list').innerHTML = campaigns.length
     ? campaigns.map((c) => `${campaignCard(c)}
@@ -286,9 +332,13 @@ async function viewPlacements() {
     <h3>Placements on chain</h3>
     <div id="p-list"></div>`;
 
-  el('p-go').onclick = (e) => action(e.target, () => write('enrol_placement', [
-    el('p-cid').value || '0', el('p-name').value, el('p-url').value,
-  ]), 'Placement submitted.');
+  el('p-go').onclick = (e) => action(e.target, () => {
+    const cid = (el('p-cid').value ?? '').trim();
+    if (!/^\d+$/.test(cid)) throw new FormError('Campaign id must be a number, taken from the Campaigns tab.');
+    const { 'p-name': name } = required([['p-name', 'Site name']]);
+    const url = httpUrl('p-url', 'Site URL');
+    return write('enrol_placement', [cid, name, url]);
+  }, 'Placement submitted.');
 
   const any = groups.some(([, list]) => list.length);
   el('p-list').innerHTML = any ? groups.filter(([, l]) => l.length).map(([c, list]) => list.map((p) => `
@@ -324,7 +374,7 @@ async function viewPlacements() {
     const rem = e.target.closest('[data-remove]');
     if (sub) {
       const id = sub.dataset.submit;
-      return action(sub, () => write('submit_period', [id, el(`s-url-${id}`).value]), 'Period submitted.');
+      return action(sub, () => write('submit_period', [id, httpUrl(`s-url-${id}`, 'Evidence URL')]), 'Period submitted.');
     }
     if (rem) {
       return action(rem, () => write('remove_placement', [rem.dataset.remove]), 'Removal submitted.');
@@ -412,9 +462,12 @@ async function viewVerification() {
         <div class="field"><label>Bond, in GEN, must equal the period share and is forfeited if the failure stands</label>
           <input id="d-bond-${id}" placeholder="1" /></div>
         <button class="act" id="d-send-${id}">Post bond and dispute</button>`;
-      el(`d-send-${id}`).onclick = (ev) => action(ev.target, () => write(
-        'dispute_period', [id, el(`d-arg-${id}`).value, el(`d-url-${id}`).value], toWei(el(`d-bond-${id}`).value),
-      ), 'Dispute opened with the bond posted.');
+      el(`d-send-${id}`).onclick = (ev) => action(ev.target, () => {
+        const { [`d-arg-${id}`]: argument } = required([[`d-arg-${id}`, 'Argument']]);
+        const url = httpUrl(`d-url-${id}`, 'Counter evidence URL');
+        const bond = positiveNumber(`d-bond-${id}`, 'Bond');
+        return write('dispute_period', [id, argument, url], toWei(bond));
+      }, 'Dispute opened with the bond posted.');
     }
   };
 
